@@ -4,9 +4,9 @@
 a = Analysis(
     ['speech.py'],
     pathex=[],
-    binaries=[('C:/Users/gma/AppData/Local/Programs/Python/Python312/Lib/site-packages/vosk', 'vosk')],
+    binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['faster_whisper', 'ctranslate2', 'huggingface_hub', 'tokenizers'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

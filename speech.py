@@ -9,27 +9,25 @@ Gebruik:
 
 import ctypes
 import ctypes.wintypes
-import json
+import io
 import os
 import queue
 import sys
 import threading
 import tkinter as tk
 import tkinter.messagebox as messagebox
-import urllib.request
 import winsound
-import zipfile
 
+import numpy as np
 import pystray
 import sounddevice as sd
+from faster_whisper import WhisperModel
 from PIL import Image, ImageDraw
-from vosk import KaldiRecognizer, Model
 
 # --- Configuration ---
 APP_NAME = "Speech-to-Cursor"
 APP_DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", "."), APP_NAME)
-MODEL_PATH = os.path.join(APP_DATA_DIR, "model")
-MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-nl-spraakherkenning-0.6.zip"
+WHISPER_MODEL = "small"  # best balance between speed and accuracy
 SAMPLE_RATE = 16000
 
 # Virtual key codes
@@ -40,9 +38,9 @@ VK_Q = 0x51
 
 # --- Global state ---
 audio_queue = queue.Queue()
+_audio_buffer = []  # collects audio chunks during push-to-talk
 listening = False
-recognizer = None
-model = None
+whisper_model = None
 tray_icon = None
 overlay = None
 
@@ -289,24 +287,34 @@ def create_icon(active: bool) -> Image.Image:
 # --- Audio ---
 def audio_callback(indata, frames, time_info, status):
     if listening:
-        audio_queue.put(bytes(indata))
+        _audio_buffer.append(bytes(indata))
 
 
-def recognition_loop():
-    global listening, recognizer
+def transcribe_buffer():
+    """Transcribe collected audio buffer with Whisper. Called when PTT is released."""
+    try:
+        if not _audio_buffer or not whisper_model:
+            return
+        raw = b"".join(_audio_buffer)
+        _audio_buffer.clear()
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-    while True:
-        data = audio_queue.get()
-        if data is None:
-            break
-        if not listening:
-            continue
+        if len(audio) < SAMPLE_RATE * 0.3:
+            return
 
-        if recognizer.AcceptWaveform(data):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").strip()
-            if text:
-                type_text(text)
+        segments, _ = whisper_model.transcribe(
+            audio,
+            language="nl",
+            beam_size=5,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            initial_prompt="Dit is een Nederlands gesprek.",
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        if text:
+            type_text(text)
+    except Exception:
+        pass
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -407,12 +415,8 @@ def stop_listening():
     listening = False
     print("Luisteren: UIT", flush=True)
     play_beep(False)
-    # Flush remaining audio from recognizer
-    if recognizer:
-        result = json.loads(recognizer.FinalResult())
-        text = result.get("text", "").strip()
-        if text:
-            type_text(text)
+    # Transcribe buffered audio in a background thread to avoid blocking
+    threading.Thread(target=transcribe_buffer, daemon=True).start()
     if tray_icon:
         tray_icon.icon = create_icon(False)
     if overlay:
@@ -435,48 +439,68 @@ def on_quit(icon, item):
     quit_app()
 
 
-def ensure_model():
-    if os.path.exists(MODEL_PATH):
-        return
+def _download_model_if_needed():
+    """Download the Whisper model via huggingface_hub with progress, if not cached."""
+    from huggingface_hub import snapshot_download, scan_cache_dir
+    import functools
 
-    os.makedirs(APP_DATA_DIR, exist_ok=True)
+    repo_id = f"Systran/faster-whisper-{WHISPER_MODEL}"
 
+    # Check if already cached
+    try:
+        cache_info = scan_cache_dir()
+        for repo in cache_info.repos:
+            if repo.repo_id == repo_id:
+                return  # already downloaded
+    except Exception:
+        pass
+
+    # Show download progress window
     win = tk.Tk()
-    win.title("Speech-to-Cursor \u2014 Model downloaden")
+    win.title("Speech-to-Cursor — Downloaden")
     win.geometry("450x100")
     win.resizable(False, False)
-    tk.Label(win, text="Nederlands spraakmodel downloaden (~860 MB)...",
-             font=("Segoe UI", 11)).pack(pady=(15, 5))
-    progress_var = tk.StringVar(value="0%")
+    win.attributes("-topmost", True)
+    tk.Label(
+        win,
+        text=f"Whisper '{WHISPER_MODEL}' model downloaden...",
+        font=("Segoe UI", 11),
+    ).pack(pady=(10, 2))
+    progress_var = tk.StringVar(value="Verbinden...")
     tk.Label(win, textvariable=progress_var, font=("Segoe UI", 10)).pack()
 
-    zip_path = MODEL_PATH + ".zip"
+    from tkinter import ttk
+    progress_bar = ttk.Progressbar(win, length=400, mode="determinate")
+    progress_bar.pack(pady=(5, 10))
+
     error = [None]
+    _bytes_so_far = [0]
+    _total_bytes = [0]
+
+    # Monkey-patch tqdm to capture progress from huggingface_hub
+    import huggingface_hub.utils._tqdm as hf_tqdm
+    _original_tqdm = hf_tqdm.tqdm
+
+    class _ProgressTqdm(_original_tqdm):
+        def update(self, n=1):
+            super().update(n)
+            _bytes_so_far[0] = self.n
+            if self.total:
+                _total_bytes[0] = self.total
+                pct = min(100, self.n * 100 / self.total)
+                mb = self.n / (1024 * 1024)
+                total_mb = self.total / (1024 * 1024)
+                win.after(0, lambda: progress_var.set(f"{mb:.0f} / {total_mb:.0f} MB ({pct:.0f}%)"))
+                win.after(0, lambda p=pct: progress_bar.configure(value=p))
 
     def do_download():
         try:
-            def reporthook(block_num, block_size, total_size):
-                downloaded = block_num * block_size
-                if total_size > 0:
-                    pct = min(100, downloaded * 100 // total_size)
-                    mb = downloaded / (1024 * 1024)
-                    total_mb = total_size / (1024 * 1024)
-                    progress_var.set(f"{mb:.0f} / {total_mb:.0f} MB ({pct}%)")
-
-            urllib.request.urlretrieve(MODEL_URL, zip_path, reporthook)
-
-            progress_var.set("Uitpakken...")
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                top = zf.namelist()[0].split("/")[0]
-                zf.extractall(APP_DATA_DIR)
-                extracted = os.path.join(APP_DATA_DIR, top)
-                if extracted != MODEL_PATH:
-                    os.rename(extracted, MODEL_PATH)
-
-            os.remove(zip_path)
+            hf_tqdm.tqdm = _ProgressTqdm
+            snapshot_download(repo_id)
         except Exception as e:
             error[0] = str(e)
         finally:
+            hf_tqdm.tqdm = _original_tqdm
             win.after(0, win.destroy)
 
     threading.Thread(target=do_download, daemon=True).start()
@@ -487,18 +511,47 @@ def ensure_model():
         sys.exit(1)
 
 
+def load_whisper_model():
+    """Download (if needed) and load the Whisper model with a progress window."""
+    global whisper_model
+
+    _download_model_if_needed()
+
+    win = tk.Tk()
+    win.title("Speech-to-Cursor")
+    win.geometry("400x60")
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    tk.Label(
+        win,
+        text=f"Whisper '{WHISPER_MODEL}' model laden...\nDit kan 1-2 minuten duren, sluit dit venster niet.",
+        font=("Segoe UI", 11),
+    ).pack(pady=(10, 5))
+
+    error = [None]
+
+    def do_load():
+        try:
+            global whisper_model
+            whisper_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="float32")
+        except Exception as e:
+            error[0] = str(e)
+        finally:
+            win.after(0, win.destroy)
+
+    threading.Thread(target=do_load, daemon=True).start()
+    win.mainloop()
+
+    if error[0]:
+        messagebox.showerror("Fout", f"Model laden mislukt:\n{error[0]}")
+        sys.exit(1)
+
+
 def main():
-    global model, recognizer, tray_icon, overlay
+    global whisper_model, tray_icon, overlay
 
-    ensure_model()
-
-    print("Model laden (dit kan even duren bij het grote model)...")
-    model = Model(MODEL_PATH)
-    recognizer = KaldiRecognizer(model, SAMPLE_RATE)
+    load_whisper_model()
     print("Model geladen!")
-
-    rec_thread = threading.Thread(target=recognition_loop, daemon=True)
-    rec_thread.start()
 
     stream = sd.RawInputStream(
         samplerate=SAMPLE_RATE,
