@@ -5,7 +5,7 @@ import sys
 import urllib.request
 import zipfile
 
-MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-nl-0.22.zip"
+MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-nl-spraakherkenning-0.6.zip"
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
 
 
