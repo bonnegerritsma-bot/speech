@@ -445,7 +445,6 @@ def on_quit(icon, item):
 def _download_model_if_needed():
     """Download the Whisper model via huggingface_hub with progress, if not cached."""
     from huggingface_hub import snapshot_download, scan_cache_dir
-    import functools
 
     repo_id = f"Systran/faster-whisper-{WHISPER_MODEL}"
 
@@ -477,33 +476,14 @@ def _download_model_if_needed():
     progress_bar.pack(pady=(5, 10))
 
     error = [None]
-    _bytes_so_far = [0]
-    _total_bytes = [0]
-
-    # Monkey-patch tqdm to capture progress from huggingface_hub
-    import huggingface_hub.utils._tqdm as hf_tqdm
-    _original_tqdm = hf_tqdm.tqdm
-
-    class _ProgressTqdm(_original_tqdm):
-        def update(self, n=1):
-            super().update(n)
-            _bytes_so_far[0] = self.n
-            if self.total:
-                _total_bytes[0] = self.total
-                pct = min(100, self.n * 100 / self.total)
-                mb = self.n / (1024 * 1024)
-                total_mb = self.total / (1024 * 1024)
-                win.after(0, lambda: progress_var.set(f"{mb:.0f} / {total_mb:.0f} MB ({pct:.0f}%)"))
-                win.after(0, lambda p=pct: progress_bar.configure(value=p))
 
     def do_download():
         try:
-            hf_tqdm.tqdm = _ProgressTqdm
             snapshot_download(repo_id)
+            win.after(0, lambda: progress_var.set("Download voltooid!"))
         except Exception as e:
             error[0] = str(e)
         finally:
-            hf_tqdm.tqdm = _original_tqdm
             win.after(0, win.destroy)
 
     threading.Thread(target=do_download, daemon=True).start()
