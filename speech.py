@@ -39,6 +39,7 @@ VK_Q = 0x51
 # --- Global state ---
 audio_queue = queue.Queue()
 _audio_buffer = []  # collects audio chunks during push-to-talk
+_buffer_lock = threading.Lock()  # protects _audio_buffer and listening
 listening = False
 whisper_model = None
 tray_icon = None
@@ -66,7 +67,7 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
         ("scanCode", ctypes.wintypes.DWORD),
         ("flags", ctypes.wintypes.DWORD),
         ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ("dwExtraInfo", ctypes.c_size_t),
     ]
 
 # Properly declare Win32 function signatures for 64-bit compatibility
@@ -287,16 +288,18 @@ def create_icon(active: bool) -> Image.Image:
 # --- Audio ---
 def audio_callback(indata, frames, time_info, status):
     if listening:
-        _audio_buffer.append(bytes(indata))
+        with _buffer_lock:
+            _audio_buffer.append(bytes(indata))
 
 
 def transcribe_buffer():
     """Transcribe collected audio buffer with Whisper. Called when PTT is released."""
     try:
-        if not _audio_buffer or not whisper_model:
-            return
-        raw = b"".join(_audio_buffer)
-        _audio_buffer.clear()
+        with _buffer_lock:
+            if not _audio_buffer or not whisper_model:
+                return
+            raw = b"".join(_audio_buffer)
+            _audio_buffer.clear()
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
         if len(audio) < SAMPLE_RATE * 0.3:
@@ -313,8 +316,8 @@ def transcribe_buffer():
         text = " ".join(seg.text.strip() for seg in segments).strip()
         if text:
             type_text(text)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[transcribe] Fout: {e}", flush=True)
 
 
 class MOUSEINPUT(ctypes.Structure):
