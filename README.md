@@ -1,13 +1,15 @@
 # Speech-to-Cursor
 
 Windows spraakherkenning die gesproken tekst typt op de plek waar je cursor staat.
+Gebruikt [faster-whisper](https://github.com/SYSTRAN/faster-whisper) met het `small` model, geoptimaliseerd voor Nederlands.
 
 ## Installatie
 
 ```bash
 pip install -r requirements.txt
-python download_model.py
 ```
+
+Het Whisper-model wordt automatisch gedownload bij de eerste keer opstarten.
 
 ## Gebruik
 
@@ -15,7 +17,7 @@ python download_model.py
 python speech.py
 ```
 
-- Start de applicatie — er verschijnt een icoon in de systeem-tray
-- Druk op **Ctrl+Shift+S** om luisteren te starten/stoppen
-- Spreek in je microfoon — de herkende tekst wordt getypt waar je cursor staat
-- Rechtsklik op het tray-icoon om af te sluiten
+- Start de applicatie — er verschijnt een overlay-venster en een icoon in de systeem-tray
+- Houd **Ctrl+Spatie** ingedrukt om te spreken (push-to-talk)
+- Laat los — de herkende tekst wordt getypt waar je cursor staat
+- **Ctrl+Shift+Q** om af te sluiten (of klik op de X in de overlay)

@@ -39,6 +39,7 @@ VK_Q = 0x51
 # --- Global state ---
 audio_queue = queue.Queue()
 _audio_buffer = []  # collects audio chunks during push-to-talk
+_buffer_lock = threading.Lock()  # protects _audio_buffer and listening
 listening = False
 whisper_model = None
 tray_icon = None
@@ -66,7 +67,7 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
         ("scanCode", ctypes.wintypes.DWORD),
         ("flags", ctypes.wintypes.DWORD),
         ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ("dwExtraInfo", ctypes.c_size_t),
     ]
 
 # Properly declare Win32 function signatures for 64-bit compatibility
@@ -287,16 +288,18 @@ def create_icon(active: bool) -> Image.Image:
 # --- Audio ---
 def audio_callback(indata, frames, time_info, status):
     if listening:
-        _audio_buffer.append(bytes(indata))
+        with _buffer_lock:
+            _audio_buffer.append(bytes(indata))
 
 
 def transcribe_buffer():
     """Transcribe collected audio buffer with Whisper. Called when PTT is released."""
     try:
-        if not _audio_buffer or not whisper_model:
-            return
-        raw = b"".join(_audio_buffer)
-        _audio_buffer.clear()
+        with _buffer_lock:
+            if not _audio_buffer or not whisper_model:
+                return
+            raw = b"".join(_audio_buffer)
+            _audio_buffer.clear()
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
         if len(audio) < SAMPLE_RATE * 0.3:
@@ -313,8 +316,8 @@ def transcribe_buffer():
         text = " ".join(seg.text.strip() for seg in segments).strip()
         if text:
             type_text(text)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[transcribe] Fout: {e}", flush=True)
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -442,7 +445,6 @@ def on_quit(icon, item):
 def _download_model_if_needed():
     """Download the Whisper model via huggingface_hub with progress, if not cached."""
     from huggingface_hub import snapshot_download, scan_cache_dir
-    import functools
 
     repo_id = f"Systran/faster-whisper-{WHISPER_MODEL}"
 
@@ -474,33 +476,14 @@ def _download_model_if_needed():
     progress_bar.pack(pady=(5, 10))
 
     error = [None]
-    _bytes_so_far = [0]
-    _total_bytes = [0]
-
-    # Monkey-patch tqdm to capture progress from huggingface_hub
-    import huggingface_hub.utils._tqdm as hf_tqdm
-    _original_tqdm = hf_tqdm.tqdm
-
-    class _ProgressTqdm(_original_tqdm):
-        def update(self, n=1):
-            super().update(n)
-            _bytes_so_far[0] = self.n
-            if self.total:
-                _total_bytes[0] = self.total
-                pct = min(100, self.n * 100 / self.total)
-                mb = self.n / (1024 * 1024)
-                total_mb = self.total / (1024 * 1024)
-                win.after(0, lambda: progress_var.set(f"{mb:.0f} / {total_mb:.0f} MB ({pct:.0f}%)"))
-                win.after(0, lambda p=pct: progress_bar.configure(value=p))
 
     def do_download():
         try:
-            hf_tqdm.tqdm = _ProgressTqdm
             snapshot_download(repo_id)
+            win.after(0, lambda: progress_var.set("Download voltooid!"))
         except Exception as e:
             error[0] = str(e)
         finally:
-            hf_tqdm.tqdm = _original_tqdm
             win.after(0, win.destroy)
 
     threading.Thread(target=do_download, daemon=True).start()
